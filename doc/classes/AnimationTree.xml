@@ -12,10 +12,66 @@
 		<link title="Third Person Shooter (TPS) Demo">https://godotengine.org/asset-library/asset/2710</link>
 	</tutorials>
 	<methods>
+		<method name="add_shared_parameter">
+			<return type="void" />
+			<param index="0" name="name" type="StringName" />
+			<param index="1" name="default_value" type="Variant" default="null" />
+			<description>
+				Adds a shared parameter with the given [param name] and [param default_value]. Shared parameters are named values that any number of node parameters can be bound to with [method bind_parameter], so a single value can drive many parameters at once. The value's type is taken from [param default_value].
+			</description>
+		</method>
+		<method name="bind_parameter">
+			<return type="void" />
+			<param index="0" name="parameter" type="StringName" />
+			<param index="1" name="shared_parameter" type="StringName" />
+			<description>
+				Binds the node parameter at [param parameter] to the shared parameter named [param shared_parameter]. The [param parameter] must be a full parameter path, e.g. [code]"parameters/Blend2/blend_amount"[/code]. Bound parameters become read-only and take their value from the shared parameter.
+			</description>
+		</method>
+		<method name="get_parameter_binding" qualifiers="const">
+			<return type="StringName" />
+			<param index="0" name="parameter" type="StringName" />
+			<description>
+				Returns the name of the shared parameter that [param parameter] is bound to, or an empty [StringName] if it is not bound.
+			</description>
+		</method>
 		<method name="get_process_callback" qualifiers="const" deprecated="Use [member AnimationMixer.callback_mode_process] instead.">
 			<return type="int" enum="AnimationTree.AnimationProcessCallback" />
 			<description>
 				Returns the process notification in which to update animations.
+			</description>
+		</method>
+		<method name="get_shared_parameter" qualifiers="const">
+			<return type="Variant" />
+			<param index="0" name="name" type="StringName" />
+			<description>
+				Returns the current value of the shared parameter named [param name].
+			</description>
+		</method>
+		<method name="get_shared_parameter_list" qualifiers="const">
+			<return type="PackedStringArray" />
+			<description>
+				Returns the names of all shared parameters.
+			</description>
+		</method>
+		<method name="get_shared_parameters" qualifiers="const">
+			<return type="Dictionary" />
+			<description>
+				Returns a [Dictionary] of all shared parameters and their current values.
+			</description>
+		</method>
+		<method name="has_shared_parameter" qualifiers="const">
+			<return type="bool" />
+			<param index="0" name="name" type="StringName" />
+			<description>
+				Returns [code]true[/code] if a shared parameter named [param name] exists.
+			</description>
+		</method>
+		<method name="remove_shared_parameter">
+			<return type="void" />
+			<param index="0" name="name" type="StringName" />
+			<description>
+				Removes the shared parameter named [param name] and clears any bindings that referenced it.
 			</description>
 		</method>
 		<method name="set_process_callback" deprecated="Use [member AnimationMixer.callback_mode_process] instead.">
@@ -23,6 +79,28 @@
 			<param index="0" name="mode" type="int" enum="AnimationTree.AnimationProcessCallback" />
 			<description>
 				Sets the process notification in which to update animations.
+			</description>
+		</method>
+		<method name="set_shared_parameter">
+			<return type="void" />
+			<param index="0" name="name" type="StringName" />
+			<param index="1" name="value" type="Variant" />
+			<description>
+				Sets the current value of the shared parameter named [param name].
+			</description>
+		</method>
+		<method name="set_shared_parameters">
+			<return type="void" />
+			<param index="0" name="parameters" type="Dictionary" />
+			<description>
+				Replaces all shared parameters with the given [param parameters] [Dictionary] mapping names to values.
+			</description>
+		</method>
+		<method name="unbind_parameter">
+			<return type="void" />
+			<param index="0" name="parameter" type="StringName" />
+			<description>
+				Removes the binding for the node parameter at [param parameter], letting it use its own value again.
 			</description>
 		</method>
 	</methods>
@@ -35,6 +113,9 @@
 		</member>
 		<member name="callback_mode_discrete" type="int" setter="set_callback_mode_discrete" getter="get_callback_mode_discrete" overrides="AnimationMixer" enum="AnimationMixer.AnimationCallbackModeDiscrete" default="2" />
 		<member name="deterministic" type="bool" setter="set_deterministic" getter="is_deterministic" overrides="AnimationMixer" default="true" />
+		<member name="shared_parameters" type="Dictionary" setter="set_shared_parameters" getter="get_shared_parameters">
+			A [Dictionary] of shared parameter names to their current values. Shared parameters can be bound to node parameters with [method bind_parameter] so that one value drives many parameters. Shared parameters are added, removed and edited in the AnimationTree inspector.
+		</member>
 		<member name="tree_root" type="AnimationRootNode" setter="set_tree_root" getter="get_tree_root">
 			The root animation node of this [AnimationTree]. See [AnimationRootNode].
 		</member>

@@ -31,12 +31,15 @@
 #pragma once
 
 #include "editor/docks/editor_dock.h"
+#include "editor/inspector/editor_inspector.h"
 #include "editor/plugins/editor_plugin.h"
 #include "scene/animation/animation_tree.h"
 #include "scene/gui/box_container.h"
 
 class Button;
 class EditorFileDialog;
+class LineEdit;
+class OptionButton;
 class PanelContainer;
 class ScrollContainer;
 class RichTextLabel;
@@ -119,4 +122,32 @@ public:
 	virtual void make_visible(bool p_visible) override;
 
 	AnimationTreeEditorPlugin();
+};
+
+// Editor UI for creating and removing shared parameters from the AnimationTree inspector.
+class AnimationTreeSharedParametersEditor : public VBoxContainer {
+	GDCLASS(AnimationTreeSharedParametersEditor, VBoxContainer);
+
+	ObjectID tree_id;
+	LineEdit *new_name_edit = nullptr;
+	OptionButton *new_type_option = nullptr;
+	VBoxContainer *parameter_list = nullptr;
+
+	AnimationTree *_get_tree() const;
+	void _add_parameter();
+	void _remove_parameter(const StringName &p_name);
+	void _value_submitted(const StringName &p_name, const String &p_text);
+	void _rebuild();
+
+public:
+	void set_animation_tree(AnimationTree *p_tree);
+	AnimationTreeSharedParametersEditor();
+};
+
+class EditorInspectorPluginAnimationTree : public EditorInspectorPlugin {
+	GDCLASS(EditorInspectorPluginAnimationTree, EditorInspectorPlugin);
+
+public:
+	virtual bool can_handle(Object *p_object) override;
+	virtual void parse_begin(Object *p_object) override;
 };

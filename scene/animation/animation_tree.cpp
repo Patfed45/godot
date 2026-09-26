@@ -40,6 +40,10 @@
 thread_local AnimationNode::ProcessState *AnimationNode::tls_process_state = nullptr;
 thread_local AnimationNodeInstance *AnimationNode::current_instance = nullptr;
 
+// Shared parameters are mirrored into property_map under this prefix, so that bound node slots
+// can alias the same Variant storage. They are not exposed directly in the property list.
+static const char *SHARED_PARAMETERS_BASE = "shared_parameters/";
+
 void AnimationNode::get_parameter_list(LocalVector<PropertyInfo> *r_list) const {
 	Array parameters;
 
@@ -754,6 +758,11 @@ PackedStringArray AnimationTree::get_configuration_warnings() const {
 	if (root_animation_node.is_null()) {
 		warnings.push_back(RTR("No root AnimationNode for the graph is set."));
 	}
+	for (const KeyValue<StringName, StringName> &E : parameter_bindings) {
+		if (!shared_parameters.has(E.value)) {
+			warnings.push_back(vformat(RTR("Parameter \"%s\" is bound to missing shared parameter \"%s\"."), String(E.key), String(E.value)));
+		}
+	}
 	return warnings;
 }
 
@@ -789,6 +798,13 @@ void AnimationTree::_animation_node_renamed(const ObjectID &p_oid, const String 
 				//print_line("   - Property: " + String(old_name) + " -> " + String(new_name));
 				property_map[new_name] = temp_copy;
 				property_map.erase(old_name);
+
+				// Keep shared parameter bindings pointing at the renamed path.
+				const StringName *binding = parameter_bindings.getptr(old_name);
+				if (binding) {
+					parameter_bindings[new_name] = *binding;
+					parameter_bindings.erase(old_name);
+				}
 			}
 		}
 	}
@@ -805,6 +821,7 @@ void AnimationTree::_animation_node_removed(const ObjectID &p_oid, const StringN
 		for (const PropertyInfo &E : properties) {
 			if (E.name.begins_with(base_path)) {
 				property_map.erase(E.name);
+				parameter_bindings.erase(E.name);
 			}
 		}
 	}
@@ -846,11 +863,22 @@ void AnimationTree::_update_properties_for_node(const StringName &p_base_path, c
 		if (!param) {
 			param = &property_map.insert(key, Pair<Variant, bool>())->value;
 			param->first = p_node->get_parameter_default_value(pname);
-			param->second = p_node->is_parameter_read_only(pname);
 		}
 
+		const bool read_only = p_node->is_parameter_read_only(pname);
+		const bool bound = !read_only && _has_valid_binding(key);
+		param->second = read_only || bound;
+
+		if (bound) {
+			pinfo.usage |= PROPERTY_USAGE_READ_ONLY;
+		}
 		pinfo.name = key;
 		properties.push_back(pinfo);
+
+		// Expose a dropdown so this parameter can be driven by a shared parameter.
+		if (!read_only) {
+			binding_properties.push_back(PropertyInfo(Variant::INT, String(key) + "/binding", PROPERTY_HINT_ENUM, _get_binding_hint_string()));
+		}
 	}
 
 	LocalVector<AnimationNode::ChildNode> children;
@@ -876,11 +904,23 @@ void AnimationTree::_update_properties() const {
 	// if properties are dirty, so is the validation state.
 	validation_dirty = true;
 	properties.clear();
+	binding_properties.clear();
 	instance_map.clear();
 	instance_paths.clear();
 
 	if (root_animation_node.is_valid()) {
 		_update_properties_for_node(Animation::PARAMETERS_BASE_PATH, root_animation_node);
+
+		// Mirror the shared parameters into property_map so bound slots have stable Variant storage to alias.
+		for (const KeyValue<Variant, Variant> &E : shared_parameters) {
+			StringName key = StringName(SHARED_PARAMETERS_BASE + String(E.key));
+			Pair<Variant, bool> *pair = property_map.getptr(key);
+			if (!pair) {
+				pair = &property_map.insert(key, Pair<Variant, bool>())->value;
+				pair->second = false;
+			}
+			pair->first = E.value;
+		}
 
 		// Now that the properties and instances are stable, we can update them.
 		for (KeyValue<StringName, AnimationNodeInstance> &E : instance_map) {
@@ -903,14 +943,26 @@ void AnimationTree::_update_properties() const {
 			node->get_parameter_list(&plist);
 			for (const PropertyInfo &pinfo : plist) {
 				StringName pname = pinfo.name;
+				StringName full_name = StringName(instance_path + String(pname));
 
-				Pair<Variant, bool> *pair = property_map.getptr(instance_path + pname);
+				Pair<Variant, bool> *pair = property_map.getptr(full_name);
 				CRASH_COND(!pair); // Shouldn't ever happen.
 
-				instance.property_ptrs[pname] = &pair->first;
+				Variant *target = &pair->first;
+
+				// If bound to a shared parameter, alias its storage so all bound slots share one value.
+				StringName shared_parameter;
+				if (_get_valid_binding(full_name, shared_parameter)) {
+					Pair<Variant, bool> *shared_pair = property_map.getptr(StringName(SHARED_PARAMETERS_BASE + String(shared_parameter)));
+					if (shared_pair) {
+						target = &shared_pair->first;
+					}
+				}
+
+				instance.property_ptrs[pname] = target;
 
 				// Some of these get special treatment.
-				instance.maybe_bind_slot_property(pname, &pair->first);
+				instance.maybe_bind_slot_property(pname, target);
 			}
 		}
 	}
@@ -918,6 +970,136 @@ void AnimationTree::_update_properties() const {
 	properties_dirty = false;
 
 	const_cast<AnimationTree *>(this)->notify_property_list_changed();
+}
+
+bool AnimationTree::_get_valid_binding(const StringName &p_property, StringName &r_shared_parameter) const {
+	const StringName *binding = parameter_bindings.getptr(p_property);
+	if (!binding) {
+		return false;
+	}
+	if (!shared_parameters.has(*binding)) {
+		return false;
+	}
+	r_shared_parameter = *binding;
+	return true;
+}
+
+bool AnimationTree::_has_valid_binding(const StringName &p_property) const {
+	StringName shared_parameter;
+	return _get_valid_binding(p_property, shared_parameter);
+}
+
+String AnimationTree::_get_binding_hint_string() const {
+	// Index 0 is an empty entry meaning "not bound".
+	String hint;
+	for (const Variant &name : shared_parameters.keys()) {
+		hint += ",";
+		hint += String(name);
+	}
+	return hint;
+}
+
+void AnimationTree::set_shared_parameters(const Dictionary &p_parameters) {
+	shared_parameters = p_parameters;
+	properties_dirty = true;
+	notify_property_list_changed();
+}
+
+Dictionary AnimationTree::get_shared_parameters() const {
+	return shared_parameters;
+}
+
+void AnimationTree::add_shared_parameter(const StringName &p_name, const Variant &p_default_value) {
+	ERR_FAIL_COND_MSG(p_name.is_empty(), "Shared parameter name cannot be empty.");
+	if (shared_parameters.has(p_name)) {
+		return;
+	}
+	shared_parameters[p_name] = p_default_value;
+	properties_dirty = true;
+	notify_property_list_changed();
+}
+
+void AnimationTree::remove_shared_parameter(const StringName &p_name) {
+	if (!shared_parameters.has(p_name)) {
+		return;
+	}
+	shared_parameters.erase(p_name);
+
+	// Drop any bindings pointing at the removed parameter.
+	LocalVector<StringName> to_erase;
+	for (const KeyValue<StringName, StringName> &E : parameter_bindings) {
+		if (E.value == p_name) {
+			to_erase.push_back(E.key);
+		}
+	}
+	for (const StringName &E : to_erase) {
+		parameter_bindings.erase(E);
+	}
+
+	property_map.erase(StringName(SHARED_PARAMETERS_BASE + String(p_name)));
+
+	properties_dirty = true;
+	notify_property_list_changed();
+}
+
+bool AnimationTree::has_shared_parameter(const StringName &p_name) const {
+	return shared_parameters.has(p_name);
+}
+
+PackedStringArray AnimationTree::get_shared_parameter_list() const {
+	PackedStringArray ret;
+	for (const Variant &name : shared_parameters.keys()) {
+		ret.push_back(name);
+	}
+	return ret;
+}
+
+void AnimationTree::set_shared_parameter(const StringName &p_name, const Variant &p_value) {
+	ERR_FAIL_COND_MSG(!shared_parameters.has(p_name), vformat("No shared parameter named \"%s\".", String(p_name)));
+
+	Variant &prop = shared_parameters[p_name];
+	// Keep the existing type where possible (e.g. setting an int on a float parameter).
+	if (Animation::needs_type_cast(prop, p_value)) {
+		Variant value = p_value;
+		if (!Animation::validate_type_match(prop, value)) {
+			return;
+		}
+		prop = value;
+	} else {
+		prop = p_value;
+	}
+
+	Pair<Variant, bool> *pair = property_map.getptr(StringName(SHARED_PARAMETERS_BASE + String(p_name)));
+	if (pair) {
+		pair->first = prop;
+	}
+}
+
+Variant AnimationTree::get_shared_parameter(const StringName &p_name) const {
+	return shared_parameters.get(p_name, Variant());
+}
+
+void AnimationTree::bind_parameter(const StringName &p_parameter, const StringName &p_shared_parameter) {
+	if (p_shared_parameter.is_empty() || !shared_parameters.has(p_shared_parameter)) {
+		parameter_bindings.erase(p_parameter);
+	} else {
+		parameter_bindings[p_parameter] = p_shared_parameter;
+	}
+
+	properties_dirty = true;
+	notify_property_list_changed();
+}
+
+void AnimationTree::unbind_parameter(const StringName &p_parameter) {
+	if (parameter_bindings.erase(p_parameter)) {
+		properties_dirty = true;
+		notify_property_list_changed();
+	}
+}
+
+StringName AnimationTree::get_parameter_binding(const StringName &p_parameter) const {
+	const StringName *binding = parameter_bindings.getptr(p_parameter);
+	return binding ? *binding : StringName();
 }
 
 void AnimationTree::_update_connections() {
@@ -1067,10 +1249,26 @@ bool AnimationTree::_set(const StringName &p_name, const Variant &p_value) {
 #endif // DISABLE_DEPRECATED
 	_update_properties();
 
+	// Binding selector: "<parameter path>/binding" is an enum index into the shared parameter list.
+	const String name_str = p_name;
+	if (name_str.ends_with("/binding")) {
+		const StringName parameter = name_str.substr(0, name_str.length() - 8);
+		const int index = p_value;
+		Array shared_names = shared_parameters.keys();
+		if (index <= 0 || index > shared_names.size()) {
+			parameter_bindings.erase(parameter);
+		} else {
+			parameter_bindings[parameter] = shared_names[index - 1];
+		}
+		properties_dirty = true;
+		const_cast<AnimationTree *>(this)->notify_property_list_changed();
+		return true;
+	}
+
 	if (Pair<Variant, bool> *property_ptr = property_map.getptr(p_name)) {
 		Pair<Variant, bool> *&pair = property_ptr;
-		if (is_inside_tree() && pair->second) {
-			return false; // Prevent to set property by user.
+		if (_has_valid_binding(p_name) || (is_inside_tree() && pair->second)) {
+			return false; // Bound parameters are driven by their shared parameter.
 		}
 
 		Variant &prop = pair->first;
@@ -1099,8 +1297,29 @@ bool AnimationTree::_get(const StringName &p_name, Variant &r_ret) const {
 #endif // DISABLE_DEPRECATED
 	_update_properties();
 
+	const String name_str = p_name;
+	if (name_str.ends_with("/binding")) {
+		const StringName parameter = name_str.substr(0, name_str.length() - 8);
+		const StringName *binding = parameter_bindings.getptr(parameter);
+		int index = 0;
+		if (binding) {
+			Array shared_names = shared_parameters.keys();
+			const int found = shared_names.find(*binding);
+			if (found != -1) {
+				index = found + 1;
+			}
+		}
+		r_ret = index;
+		return true;
+	}
+
 	if (const Pair<Variant, bool> *p = property_map.getptr(p_name)) {
-		r_ret = p->first;
+		StringName shared_parameter;
+		if (_get_valid_binding(p_name, shared_parameter)) {
+			r_ret = shared_parameters.get(shared_parameter, p->first);
+		} else {
+			r_ret = p->first;
+		}
 		return true;
 	}
 
@@ -1111,6 +1330,9 @@ void AnimationTree::_get_property_list(List<PropertyInfo> *p_list) const {
 	_update_properties();
 
 	for (const PropertyInfo &E : properties) {
+		p_list->push_back(E);
+	}
+	for (const PropertyInfo &E : binding_properties) {
 		p_list->push_back(E);
 	}
 }
@@ -1153,9 +1375,22 @@ void AnimationTree::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_animation_player", "path"), &AnimationTree::set_animation_player);
 	ClassDB::bind_method(D_METHOD("get_animation_player"), &AnimationTree::get_animation_player);
 
+	ClassDB::bind_method(D_METHOD("set_shared_parameters", "parameters"), &AnimationTree::set_shared_parameters);
+	ClassDB::bind_method(D_METHOD("get_shared_parameters"), &AnimationTree::get_shared_parameters);
+	ClassDB::bind_method(D_METHOD("add_shared_parameter", "name", "default_value"), &AnimationTree::add_shared_parameter, DEFVAL(Variant()));
+	ClassDB::bind_method(D_METHOD("remove_shared_parameter", "name"), &AnimationTree::remove_shared_parameter);
+	ClassDB::bind_method(D_METHOD("has_shared_parameter", "name"), &AnimationTree::has_shared_parameter);
+	ClassDB::bind_method(D_METHOD("get_shared_parameter_list"), &AnimationTree::get_shared_parameter_list);
+	ClassDB::bind_method(D_METHOD("set_shared_parameter", "name", "value"), &AnimationTree::set_shared_parameter);
+	ClassDB::bind_method(D_METHOD("get_shared_parameter", "name"), &AnimationTree::get_shared_parameter);
+	ClassDB::bind_method(D_METHOD("bind_parameter", "parameter", "shared_parameter"), &AnimationTree::bind_parameter);
+	ClassDB::bind_method(D_METHOD("unbind_parameter", "parameter"), &AnimationTree::unbind_parameter);
+	ClassDB::bind_method(D_METHOD("get_parameter_binding", "parameter"), &AnimationTree::get_parameter_binding);
+
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "tree_root", PROPERTY_HINT_RESOURCE_TYPE, AnimationRootNode::get_class_static()), "set_tree_root", "get_tree_root");
 	ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "advance_expression_base_node", PROPERTY_HINT_NODE_PATH_VALID_TYPES, "Node"), "set_advance_expression_base_node", "get_advance_expression_base_node");
 	ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "anim_player", PROPERTY_HINT_NODE_PATH_VALID_TYPES, "AnimationPlayer"), "set_animation_player", "get_animation_player");
+	ADD_PROPERTY(PropertyInfo(Variant::DICTIONARY, "shared_parameters", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR), "set_shared_parameters", "get_shared_parameters");
 
 	ADD_SIGNAL(MethodInfo("animation_player_changed"));
 }

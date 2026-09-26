@@ -32,6 +32,7 @@
 
 #include "core/object/callable_mp.h"
 #include "core/string/string_buffer.h"
+#include "core/variant/variant_utility.h"
 #include "editor/animation/animation_blend_space_1d_editor.h"
 #include "editor/animation/animation_blend_space_2d_editor.h"
 #include "editor/animation/animation_blend_tree_editor_plugin.h"
@@ -39,12 +40,15 @@
 #include "editor/docks/editor_dock_manager.h"
 #include "editor/editor_node.h"
 #include "editor/editor_string_names.h"
+#include "editor/editor_undo_redo_manager.h"
 #include "editor/gui/editor_bottom_panel.h"
 #include "editor/settings/editor_command_palette.h"
 #include "editor/themes/editor_scale.h"
 #include "scene/animation/animation_blend_tree.h"
 #include "scene/gui/button.h"
+#include "scene/gui/line_edit.h"
 #include "scene/gui/margin_container.h"
+#include "scene/gui/option_button.h"
 #include "scene/gui/rich_text_label.h"
 #include "scene/gui/scroll_container.h"
 #include "scene/gui/separator.h"
@@ -594,6 +598,185 @@ AnimationTreeEditor::AnimationTreeEditor() {
 	error_scroll->hide();
 }
 
+AnimationTree *AnimationTreeSharedParametersEditor::_get_tree() const {
+	return Object::cast_to<AnimationTree>(ObjectDB::get_instance(tree_id));
+}
+
+void AnimationTreeSharedParametersEditor::_rebuild() {
+	for (int i = parameter_list->get_child_count() - 1; i >= 0; i--) {
+		parameter_list->get_child(i)->queue_free();
+	}
+
+	AnimationTree *tree = _get_tree();
+	if (!tree) {
+		return;
+	}
+
+	for (const String &name : tree->get_shared_parameter_list()) {
+		const Variant value = tree->get_shared_parameter(name);
+
+		HBoxContainer *row = memnew(HBoxContainer);
+		parameter_list->add_child(row);
+
+		Label *name_label = memnew(Label(name));
+		name_label->set_custom_minimum_size(Size2(140, 0) * EDSCALE);
+		name_label->set_tooltip_text(name);
+		row->add_child(name_label);
+
+		LineEdit *value_edit = memnew(LineEdit);
+		value_edit->set_h_size_flags(SIZE_EXPAND_FILL);
+		value_edit->set_text(VariantUtilityFunctions::var_to_str(value));
+		value_edit->set_accessibility_name(vformat(TTRC("Value of shared parameter %s"), name));
+		value_edit->connect("text_submitted", callable_mp(this, &AnimationTreeSharedParametersEditor::_value_submitted).bind(name));
+		row->add_child(value_edit);
+
+		Button *remove_button = memnew(Button);
+		remove_button->set_text(TTR("Remove"));
+		remove_button->connect(SceneStringName(pressed), callable_mp(this, &AnimationTreeSharedParametersEditor::_remove_parameter).bind(name));
+		row->add_child(remove_button);
+	}
+}
+
+void AnimationTreeSharedParametersEditor::_add_parameter() {
+	AnimationTree *tree = _get_tree();
+	if (!tree) {
+		return;
+	}
+
+	const StringName name = new_name_edit->get_text().strip_edges();
+	if (name.is_empty() || tree->has_shared_parameter(name)) {
+		return;
+	}
+
+	Variant value;
+	switch (new_type_option->get_selected()) {
+		case 0: {
+			value = 0.0;
+		} break;
+		case 1: {
+			value = 0;
+		} break;
+		case 2: {
+			value = false;
+		} break;
+		case 3: {
+			value = String();
+		} break;
+		case 4: {
+			value = Vector2();
+		} break;
+		case 5: {
+			value = Vector3();
+		} break;
+		case 6: {
+			value = Color();
+		} break;
+	}
+
+	EditorUndoRedoManager *undo_redo = EditorUndoRedoManager::get_singleton();
+	undo_redo->create_action(TTR("Add Shared Parameter"));
+	undo_redo->add_do_method(tree, "add_shared_parameter", name, value);
+	undo_redo->add_undo_method(tree, "remove_shared_parameter", name);
+	undo_redo->commit_action();
+
+	new_name_edit->clear();
+}
+
+void AnimationTreeSharedParametersEditor::_remove_parameter(const StringName &p_name) {
+	AnimationTree *tree = _get_tree();
+	if (!tree || !tree->has_shared_parameter(p_name)) {
+		return;
+	}
+
+	const Variant value = tree->get_shared_parameter(p_name);
+
+	EditorUndoRedoManager *undo_redo = EditorUndoRedoManager::get_singleton();
+	undo_redo->create_action(TTR("Remove Shared Parameter"));
+	undo_redo->add_do_method(tree, "remove_shared_parameter", p_name);
+	undo_redo->add_undo_method(tree, "add_shared_parameter", p_name, value);
+	undo_redo->commit_action();
+}
+
+void AnimationTreeSharedParametersEditor::_value_submitted(const StringName &p_name, const String &p_text) {
+	AnimationTree *tree = _get_tree();
+	if (!tree || !tree->has_shared_parameter(p_name)) {
+		return;
+	}
+
+	Variant parsed;
+	if (tree->get_shared_parameter(p_name).get_type() == Variant::STRING) {
+		parsed = p_text;
+	} else {
+		parsed = VariantUtilityFunctions::str_to_var(p_text);
+		if (parsed.get_type() == Variant::NIL && p_text.strip_edges() != "null") {
+			_rebuild(); // Invalid input, restore the previous text.
+			return;
+		}
+	}
+
+	const Variant old_value = tree->get_shared_parameter(p_name);
+
+	EditorUndoRedoManager *undo_redo = EditorUndoRedoManager::get_singleton();
+	undo_redo->create_action(TTR("Set Shared Parameter"));
+	undo_redo->add_do_method(tree, "set_shared_parameter", p_name, parsed);
+	undo_redo->add_undo_method(tree, "set_shared_parameter", p_name, old_value);
+	undo_redo->commit_action();
+
+	_rebuild();
+}
+
+void AnimationTreeSharedParametersEditor::set_animation_tree(AnimationTree *p_tree) {
+	tree_id = p_tree ? p_tree->get_instance_id() : ObjectID();
+	_rebuild();
+}
+
+AnimationTreeSharedParametersEditor::AnimationTreeSharedParametersEditor() {
+	HBoxContainer *add_row = memnew(HBoxContainer);
+	add_child(add_row);
+
+	new_name_edit = memnew(LineEdit);
+	new_name_edit->set_h_size_flags(SIZE_EXPAND_FILL);
+	new_name_edit->set_placeholder(TTR("New parameter"));
+	new_name_edit->set_accessibility_name(TTRC("New shared parameter name"));
+	new_name_edit->connect(SceneStringName(text_submitted), callable_mp(this, &AnimationTreeSharedParametersEditor::_add_parameter).unbind(1));
+	add_row->add_child(new_name_edit);
+
+	new_type_option = memnew(OptionButton);
+	new_type_option->add_item(TTR("Float"));
+	new_type_option->add_item(TTR("Int"));
+	new_type_option->add_item(TTR("Bool"));
+	new_type_option->add_item(TTR("String"));
+	new_type_option->add_item(TTR("Vector2"));
+	new_type_option->add_item(TTR("Vector3"));
+	new_type_option->add_item(TTR("Color"));
+	add_row->add_child(new_type_option);
+
+	Button *add_button = memnew(Button);
+	add_button->set_text(TTR("Add"));
+	add_button->connect(SceneStringName(pressed), callable_mp(this, &AnimationTreeSharedParametersEditor::_add_parameter));
+	add_row->add_child(add_button);
+
+	parameter_list = memnew(VBoxContainer);
+	add_child(parameter_list);
+
+	add_child(memnew(HSeparator));
+}
+
+bool EditorInspectorPluginAnimationTree::can_handle(Object *p_object) {
+	return Object::cast_to<AnimationTree>(p_object) != nullptr;
+}
+
+void EditorInspectorPluginAnimationTree::parse_begin(Object *p_object) {
+	AnimationTree *tree = Object::cast_to<AnimationTree>(p_object);
+	if (!tree) {
+		return;
+	}
+
+	AnimationTreeSharedParametersEditor *editor = memnew(AnimationTreeSharedParametersEditor);
+	editor->set_animation_tree(tree);
+	add_custom_control(editor);
+}
+
 void AnimationTreeEditorPlugin::edit(Object *p_object) {
 	anim_tree_editor->edit(Object::cast_to<AnimationTree>(p_object));
 }
@@ -617,4 +800,8 @@ AnimationTreeEditorPlugin::AnimationTreeEditorPlugin() {
 	anim_tree_editor->set_custom_minimum_size(Size2(0, 300) * EDSCALE);
 	EditorDockManager::get_singleton()->add_dock(anim_tree_editor);
 	anim_tree_editor->close();
+
+	Ref<EditorInspectorPluginAnimationTree> inspector_plugin;
+	inspector_plugin.instantiate();
+	EditorInspector::add_inspector_plugin(inspector_plugin);
 }

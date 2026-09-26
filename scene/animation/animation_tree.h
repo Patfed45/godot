@@ -480,9 +480,16 @@ private:
 	friend class AnimationNode;
 
 	mutable LocalVector<PropertyInfo> properties;
+	mutable LocalVector<PropertyInfo> binding_properties; // Per-parameter "$param/binding" selector properties (not part of property_map).
 	mutable AHashMap<StringName, Pair<Variant, bool>> property_map; // Property value and read-only flag.
 	mutable AHashMap<StringName, AnimationNodeInstance> instance_map;
 	mutable AHashMap<ObjectID, HashSet<StringName>> instance_paths;
+
+	// Shared parameters: a named value store that any number of node parameters can be bound to.
+	// The Dictionary holds the values (and types). They are mirrored into property_map under the
+	// "shared_parameters/" prefix so that bound node slots can alias the same Variant storage.
+	Dictionary shared_parameters;
+	AHashMap<StringName, StringName> parameter_bindings; // Full parameter path (e.g. "parameters/Blend2/blend_amount") -> shared parameter name.
 
 	mutable bool properties_dirty = true;
 	mutable bool validation_dirty = true;
@@ -491,6 +498,10 @@ private:
 	void _update_connections();
 	void _add_validation_error(const StringName &p_path, const String &p_error, int p_input_index = -1) const;
 	void _update_properties_for_node(const StringName &p_base_path, const Ref<AnimationNode> &p_node) const;
+
+	bool _get_valid_binding(const StringName &p_property, StringName &r_shared_parameter) const;
+	bool _has_valid_binding(const StringName &p_property) const;
+	String _get_binding_hint_string() const;
 
 	void _tree_changed();
 	void _node_updated(const ObjectID &p_oid);
@@ -561,6 +572,23 @@ public:
 
 	void set_root_animation_node(const Ref<AnimationRootNode> &p_animation_node);
 	Ref<AnimationRootNode> get_root_animation_node() const;
+
+	// Shared parameters.
+	void set_shared_parameters(const Dictionary &p_parameters);
+	Dictionary get_shared_parameters() const;
+
+	void add_shared_parameter(const StringName &p_name, const Variant &p_default_value = Variant());
+	void remove_shared_parameter(const StringName &p_name);
+	bool has_shared_parameter(const StringName &p_name) const;
+	PackedStringArray get_shared_parameter_list() const;
+
+	void set_shared_parameter(const StringName &p_name, const Variant &p_value);
+	Variant get_shared_parameter(const StringName &p_name) const;
+
+	// Bind a node parameter (full path, e.g. "parameters/Blend2/blend_amount") to a shared parameter.
+	void bind_parameter(const StringName &p_parameter, const StringName &p_shared_parameter);
+	void unbind_parameter(const StringName &p_parameter);
+	StringName get_parameter_binding(const StringName &p_parameter) const;
 
 	void set_advance_expression_base_node(const NodePath &p_path);
 	NodePath get_advance_expression_base_node() const;
